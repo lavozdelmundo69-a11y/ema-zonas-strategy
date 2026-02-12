@@ -2,22 +2,22 @@
 """
 Backtester Completo para Estrategia EMA 3/22 + Zonas Mitigadas
 
-Modo 1: Con CSV local
+Detecta:
+- Zonas de liquidez: Swing highs/lows (sin lookahead, confirmación con delay)
+- Zonas de interés: FVG (Fair Value Gaps)
+- Señal: Cruce EMA + zona mitigada reciente (ventana N barras)
+- Salida: TP/SL basados en ATR
+
+Uso:
     python backtester_ema_zonas.py datos.csv
-
-Modo 2: Descargar datos automáticamente (últimos 5 años)
-    python backtester_ema_zonas.py --download BTC-USD
-    python backtester_ema_zonas.py --download SPY
-    python backtester_ema_zonas.py --download EURUSD=X
-
-Resultados: Win rate, profit factor, retorno total, lista de trades.
+    python backtester_ema_zonas.py --download BTC-USD --years 5
 """
 
 import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 class EstrategiaEMAZonas:
     def __init__(self, fast_ema=3, slow_ema=22, bars_window=10,
@@ -36,32 +36,28 @@ class EstrategiaEMAZonas:
         self.use_liq = use_liq
         self.use_fvg = use_fvg
         
-        self.liq_highs = []
+        # Arrays persistentes (simulan var arrays de Pine)
+        self.liq_highs = []   # [{'price': float, 'bar_idx': int, 'mitigated': bool, 'mitig_bar': int}, ...]
         self.liq_lows = []
-        self.fvg_zones = []
+        self.fvg_zones = []   # [{'top': float, 'bot': float, 'origin_bar': int, 'mitigated': bool, 'mitig_bar': int, 'is_bull': bool}, ...]
         
-    def detect_swing_highs_lows(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Detecta pivots usando centro de ventana"""
-        swing_high = df['high'].rolling(self.swing_len, center=True).apply(
-            lambda x: x[self.swing_len//2] == max(x), raw=True
-        )
-        swing_low = df['low'].rolling(self.swing_len, center=True).apply(
-            lambda x: x[self.swing_len//2] == min(x), raw=True
-        )
-        df['swing_high'] = swing_high.fillna(0).astype(bool)
-        df['swing_low'] = swing_low.fillna(0).astype(bool)
+    def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Calcula EMAs y ATR"""
+        df['ema_fast'] = df['close'].ewm(span=self.fast_ema, adjust=False).mean()
+        df['ema_slow'] = df['close'].ewm(span=self.slow_ema, adjust=False).mean()
+        
+        # ATR
+        high_low = df['high'] - df['low']
+        high_close = np.abs(df['high'] - df['close'].shift())
+        low_close = np.abs(df['low'] - df['close'].shift())
+        ranges = pd.concat([high_low, high_close, low_close], axis=1)
+        true_range = np.max(ranges, axis=1)
+        df['atr'] = true_range.rolling(window=self.atr_len).mean()
+        
         return df
     
-    def add_liquidity_zone(self, price: float, bar_idx: int, is_high: bool):
-        arr = self.liq_highs if is_high else self.liq_lows
-        arr.append({
-            'price': price,
-            'bar_idx': bar_idx,
-            'mitigated': False,
-            'mitig_bar': -1
-        })
-        
     def check_liquidity_mitigation(self, close: float, bar_idx: int):
+        """Actualiza estado de mitigación de zonas de liquidez"""
         for arr in [self.liq_highs, self.liq_lows]:
             for zone in arr:
                 if zone['mitigated']:
@@ -74,8 +70,9 @@ class EstrategiaEMAZonas:
                 if mitigated:
                     zone['mitigated'] = True
                     zone['mitig_bar'] = bar_idx
-                    
+
     def check_fvg_mitigation(self, close: float, bar_idx: int):
+        """Actualiza estado de mitigación de FVGs"""
         for zone in self.fvg_zones:
             if zone['mitigated']:
                 continue
@@ -87,113 +84,146 @@ class EstrategiaEMAZonas:
             if mitigated:
                 zone['mitigated'] = True
                 zone['mitig_bar'] = bar_idx
-                
-    def add_fvg_zone(self, df: pd.DataFrame, i: int, is_bull: bool):
-        if is_bull:
-            top, bot = df.iloc[i]['low'], df.iloc[i-2]['high']
-        else:
-            top, bot = df.iloc[i-2]['low'], df.iloc[i]['high']
-        size_pct = abs(top - bot) / df.iloc[i]['close'] * 100
-        if size_pct >= self.sens_fvg * 100:
-            self.fvg_zones.append({
-                'top': top,
-                'bot': bot,
-                'origin_bar': i-1,
-                'mitigated': False,
-                'mitig_bar': -1,
-                'is_bull': is_bull
-            })
-            
+
     def recent_zone_mitigated(self, bar_idx: int) -> bool:
+        """Retorna True si alguna zona se mitigó en la última ventana de barras"""
         window_start = bar_idx - self.bars_window
-        for arr in [self.liq_highs, self.liq_lows]:
-            for zone in arr:
-                if zone['mitigated'] and zone['mitig_bar'] >= window_start:
-                    return True
+        # Liquidez highs
+        for zone in self.liq_highs:
+            if zone['mitigated'] and zone['mitig_bar'] >= window_start:
+                return True
+        # Liquidez lows
+        for zone in self.liq_lows:
+            if zone['mitigated'] and zone['mitig_bar'] >= window_start:
+                return True
+        # FVGs
         for zone in self.fvg_zones:
             if zone['mitigated'] and zone['mitig_bar'] >= window_start:
                 return True
         return False
-        
-    def calculate_indicators(self, df: pd.DataFrame):
-        """Calcula EMAs, ATR, pivots y FVGs"""
-        df['ema_fast'] = df['close'].ewm(span=self.fast_ema, adjust=False).mean()
-        df['ema_slow'] = df['close'].ewm(span=self.slow_ema, adjust=False).mean()
-        
-        # ATR
-        high_low = df['high'] - df['low']
-        high_close = np.abs(df['high'] - df['close'].shift())
-        low_close = np.abs(df['low'] - df['close'].shift())
-        ranges = pd.concat([high_low, high_close, low_close], axis=1)
-        true_range = np.max(ranges, axis=1)
-        df['atr'] = true_range.rolling(window=self.atr_len).mean()
-        
-        df = self.detect_swing_highs_lows(df)
-        
-        # Reset arrays para este backtest
-        self.liq_highs.clear()
-        self.liq_lows.clear()
-        self.fvg_zones.clear()
-        
-        return df
-    
+
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Genera señales para cada barra"""
+        """
+        Genera señales barra a barra sin lookahead.
+        Detectar pivotes: solo confirmar en barra i si el pivot ocurrió en p = i - swing_len
+        """
+        n = len(df)
         df['signal'] = 0
-        df['zone_mitigated'] = False  # Debug: si hubo zona mitigada en ventana
+        df['zone_mitigated'] = False  # Debug
         
-        # Resetear zonas antes de empezar
+        # Preparar arrays vacíos
         self.liq_highs.clear()
         self.liq_lows.clear()
         self.fvg_zones.clear()
         
-        for i in range(self.swing_len, len(df)):
-            # 1) Detectar nuevas zonas (pivots y FVGs) en esta barra
-            row = df.iloc[i]
-            prev_row = df.iloc[i-1] if i > 0 else row
+        # Pre-calcular pivotes confirmables por barra
+        pending_highs = []  # (conf_bar, origin_bar, price)
+        pending_lows = []
+        
+        for i in range(self.swing_len, n):
+            p = i - self.swing_len
+            if p < self.swing_len:
+                continue
             
-            # Pivots (ya están en df.swing_high/low, pero añadimos al arrays)
-            if i >= self.swing_len and df.iloc[i]['swing_high']:
-                self.add_liquidity_zone(row['high'], i, is_high=True)
-            if i >= self.swing_len and df.iloc[i]['swing_low']:
-                self.add_liquidity_zone(row['low'], i, is_high=False)
+            # Swing High: high[p] > todos en [p-swing_len, p-1] y [p+1, p+swing_len]
+            left_max = df['high'].iloc[p - self.swing_len : p].max()
+            right_max = df['high'].iloc[p+1 : i+1].max()
+            if df['high'].iloc[p] > left_max and df['high'].iloc[p] > right_max:
+                pending_highs.append((i, p, df['high'].iloc[p]))
                 
-            # FVG (requiere ver i, i-1, i-2)
+            # Swing Low
+            left_min = df['low'].iloc[p - self.swing_len : p].min()
+            right_min = df['low'].iloc[p+1 : i+1].min()
+            if df['low'].iloc[p] < left_min and df['low'].iloc[p] < right_min:
+                pending_lows.append((i, p, df['low'].iloc[p]))
+                
+        pending_highs.sort(key=lambda x: x[0])
+        pending_lows.sort(key=lambda x: x[0])
+        idx_high = 0
+        idx_low = 0
+        
+        # Loop principal
+        for i in range(n):
+            # Añadir zonas confirmadas esta barra
+            while idx_high < len(pending_highs) and pending_highs[idx_high][0] == i:
+                conf, origin, price = pending_highs[idx_high]
+                self.liq_highs.append({
+                    'price': price,
+                    'bar_idx': origin,
+                    'mitigated': False,
+                    'mitig_bar': -1
+                })
+                idx_high += 1
+            while idx_low < len(pending_lows) and pending_lows[idx_low][0] == i:
+                conf, origin, price = pending_lows[idx_low]
+                self.liq_lows.append({
+                    'price': price,
+                    'bar_idx': origin,
+                    'mitigated': False,
+                    'mitig_bar': -1
+                })
+                idx_low += 1
+            
+            # FVG
             if i >= 2:
                 # Bull FVG
-                if row['low'] > df.iloc[i-2]['high'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
-                    self.add_fvg_zone(df, i, is_bull=True)
+                if df.iloc[i]['low'] > df.iloc[i-2]['high'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
+                    top = df.iloc[i]['low']
+                    bot = df.iloc[i-2]['high']
+                    size_pct = abs(top - bot) / df.iloc[i]['close'] * 100
+                    if size_pct >= self.sens_fvg * 100:
+                        self.fvg_zones.append({
+                            'top': top,
+                            'bot': bot,
+                            'origin_bar': i-1,
+                            'mitigated': False,
+                            'mitig_bar': -1,
+                            'is_bull': True
+                        })
                 # Bear FVG
-                if row['high'] < df.iloc[i-2]['low'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
-                    self.add_fvg_zone(df, i, is_bull=False)
+                if df.iloc[i]['high'] < df.iloc[i-2]['low'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
+                    top = df.iloc[i-2]['low']
+                    bot = df.iloc[i]['high']
+                    size_pct = abs(top - bot) / df.iloc[i]['close'] * 100
+                    if size_pct >= self.sens_fvg * 100:
+                        self.fvg_zones.append({
+                            'top': top,
+                            'bot': bot,
+                            'origin_bar': i-1,
+                            'mitigated': False,
+                            'mitig_bar': -1,
+                            'is_bull': False
+                        })
             
-            # 2) Verificar mitigaciones con el cierre de esta barra
-            self.check_liquidity_mitigation(row['close'], i)
-            self.check_fvg_mitigation(row['close'], i)
+            # Mitigaciones
+            close_i = df.iloc[i]['close']
+            self.check_liquidity_mitigation(close_i, i)
+            self.check_fvg_mitigation(close_i, i)
             
-            # 3) Calcular cruce EMA
-            if i == 0:
+            # EMA cross
+            if i < 1:
                 continue
             prev_fast = df.iloc[i-1]['ema_fast']
             prev_slow = df.iloc[i-1]['ema_slow']
-            curr_fast = row['ema_fast']
-            curr_slow = row['ema_slow']
+            curr_fast = df.iloc[i]['ema_fast']
+            curr_slow = df.iloc[i]['ema_slow']
             
+            if pd.isna(prev_fast) or pd.isna(prev_slow) or pd.isna(curr_fast) or pd.isna(curr_slow):
+                continue
+                
             golden = (prev_fast <= prev_slow) and (curr_fast > curr_slow)
             dead = (prev_fast >= prev_slow) and (curr_fast < curr_slow)
             
-            # 4) Verificar zona mitigada reciente
             zone_ok = self.recent_zone_mitigated(i)
             df.at[df.index[i], 'zone_mitigated'] = zone_ok
             
-            # 5) Señal
             if golden and zone_ok:
                 df.at[df.index[i], 'signal'] = 1
             elif dead and zone_ok:
                 df.at[df.index[i], 'signal'] = -1
                 
         return df
-    
+
     def run_backtest(self, df: pd.DataFrame, initial_capital=10000) -> Dict:
         """Ejecuta backtest completo con TP/SL dinámicos"""
         df = self.calculate_indicators(df.copy())
@@ -429,7 +459,6 @@ def main():
     # Cargar o descargar datos
     if args.download:
         df = download_data(args.download, years=args.years)
-        # Guardar CSV por si el usuario quiere reusar
         csv_name = f"{args.download.replace('-','_')}_{args.years}y.csv"
         df.to_csv(csv_name)
         print(f"Datos guardados en {csv_name}")
