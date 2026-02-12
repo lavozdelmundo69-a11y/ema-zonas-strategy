@@ -228,7 +228,7 @@ plotshape(short_signal, title="Short Signal", location=location.abovebar,
 // ═════════════════════════════════════════════════════════════════════════════
 // VISUALIZACIÓN DE ZONAS
 // ═════════════════════════════════════════════════════════════════════════════
-// Liquidez no mitigada
+// Liquidez no mitigada: líneas horizontales finas grises
 len_h_draw = array.size(liq_highs)
 if len_h_draw > 0
     for i = 0 to len_h_draw - 1
@@ -237,7 +237,7 @@ if len_h_draw > 0
         mitigated = array.get(liq_high_mitigated, i)
         if not mitigated and bar_index - bar_h <= 30
             line.new(bar_h, h, bar_index + 15, h,
-                     color=color.new(color.red, 60), width=1)
+                     color=color.new(color.gray, 30), width=1)
 
 len_l_draw = array.size(liq_lows)
 if len_l_draw > 0
@@ -247,17 +247,17 @@ if len_l_draw > 0
         mitigated = array.get(liq_low_mitigated, i)
         if not mitigated and bar_index - bar_l <= 30
             line.new(bar_l, l, bar_index + 15, l,
-                     color=color.new(color.green, 60), width=1)
+                     color=color.new(color.gray, 30), width=1)
 
-// Order Blocks no mitigados (cuadrados)
+// Order Blocks no mitigados: cuadrados grises (sin区分 dirección)
 len_ob_draw = array.size(ob_highs)
 if len_ob_draw > 0
     for i = 0 to len_ob_draw - 1
         if not array.get(ob_mitigated, i)
             box.new(array.get(ob_bars, i), array.get(ob_highs, i),
                     bar_index + 30, array.get(ob_lows, i),
-                    bgcolor=array.get(ob_is_bull, i) ? color.new(color.blue, 90) : color.new(color.red, 90),
-                    border_color=array.get(ob_is_bull, i) ? color.blue : color.red,
+                    bgcolor=color.new(color.gray, 85),
+                    border_color=color.gray,
                     border_width=1)
 
 // ═════════════════════════════════════════════════════════════════════════════
