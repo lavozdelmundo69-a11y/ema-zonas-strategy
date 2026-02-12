@@ -281,21 +281,42 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
         ex = getattr(ccxt, exchange)()
         ex_symbol = symbol.replace('/', '') if exchange != 'bingx' else symbol.upper().replace('/', '-')
         timeframe = interval
-        if limit is None:
-            if interval.endswith('m'):
-                mins = int(interval[:-1])
-                bars_per_year = (365 * 24 * 60) / mins
-                limit = int(bars_per_year * years) + 100
-            elif interval == '1d':
-                limit = int(365 * years) + 50
-            else:
-                limit = 1000
-        print(f"Descargando {limit} barras de {ex_symbol} ({timeframe}) desde {exchange}...")
-        ohlcv = ex.fetch_ohlcv(ex_symbol, timeframe=timeframe, limit=limit)
-        if not ohlcv:
+        
+        # Calcular número de barras needed
+        if interval.endswith('m'):
+            mins = int(interval[:-1])
+            bars_per_day = (24 * 60) / mins
+            total_bars_needed = int(bars_per_day * 365 * years) + 100
+        elif interval == '1d':
+            total_bars_needed = int(365 * years) + 50
+        else:
+            total_bars_needed = 1000
+        
+        # Binance max 1000 per call; paginar
+        limit_per_call = 1000
+        all_ohlcv = []
+        since = ex.parse8601(str((datetime.now() - timedelta(days=365*years)).isoformat()))
+        
+        print(f"Descargando {total_bars_needed} barras de {ex_symbol} ({timeframe}) desde {exchange}...")
+        while len(all_ohlcv) < total_bars_needed:
+            try:
+                batch = ex.fetch_ohlcv(ex_symbol, timeframe=timeframe, since=since, limit=limit_per_call)
+            except Exception as e:
+                print(f"Error en fetch: {e}")
+                break
+            if not batch:
+                break
+            all_ohlcv.extend(batch)
+            since = batch[-1][0] + ex.parse_timeframe(timeframe) * 1000
+            if len(batch) < limit_per_call:
+                break
+            print(f"  Descargadas {len(all_ohlcv)} barras...")
+        
+        if not all_ohlcv:
             print(f"No datos de {exchange} para {symbol}")
             sys.exit(1)
-        df = pd.DataFrame(ohlcv, columns=['timestamp','open','high','low','close','volume'])
+            
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
         df.index.name = 'timestamp'
