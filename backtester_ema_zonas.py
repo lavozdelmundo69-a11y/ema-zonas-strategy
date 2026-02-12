@@ -8,6 +8,7 @@ import sys
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
+import time
 from typing import Dict
 
 class EstrategiaEMAZonas:
@@ -292,13 +293,14 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
         else:
             total_bars_needed = 1000
         
-        # Binance max 1000 per call; paginar
+        # Paginación: Binance permite hasta 1000, pero hay límite de tasa
         limit_per_call = 1000
         all_ohlcv = []
+        # Calcular since: timestamp en ms
         since = ex.parse8601(str((datetime.now() - timedelta(days=365*years)).isoformat()))
-        
-        print(f"Descargando {total_bars_needed} barras de {ex_symbol} ({timeframe}) desde {exchange}...")
-        while len(all_ohlcv) < total_bars_needed:
+        # Asegurar que no pedimos más de 1000 barras por llamada, iterar
+        print(f"Descargando datos históricos (últimas {365*years} días) ...")
+        while True:
             try:
                 batch = ex.fetch_ohlcv(ex_symbol, timeframe=timeframe, since=since, limit=limit_per_call)
             except Exception as e:
@@ -307,10 +309,12 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
             if not batch:
                 break
             all_ohlcv.extend(batch)
-            since = batch[-1][0] + ex.parse_timeframe(timeframe) * 1000
+            # Avanzar since al último timestamp + 1ms
+            since = batch[-1][0] + 1
             if len(batch) < limit_per_call:
                 break
-            print(f"  Descargadas {len(all_ohlcv)} barras...")
+            print(f"  Totales acumuladas: {len(all_ohlcv)}")
+            time.sleep(0.1)  # respetar rate limit
         
         if not all_ohlcv:
             print(f"No datos de {exchange} para {symbol}")
