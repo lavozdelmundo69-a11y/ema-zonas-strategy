@@ -4,7 +4,7 @@ Backtester Completo para Estrategia EMA 3/22 + Zonas Mitigadas
 
 Detecta:
 - Zonas de liquidez: Swing highs/lows (sin lookahead, confirmación con delay)
-- Zonas de interés: FVG (Fair Value Gaps)
+- Zonas de interés: Order Blocks (OB) — última vela de impulso antes de reversión
 - Señal: Cruce EMA + zona mitigada reciente (ventana N barras)
 - Salida: TP/SL basados en ATR
 
@@ -22,24 +22,27 @@ from typing import Dict, List, Tuple
 class EstrategiaEMAZonas:
     def __init__(self, fast_ema=3, slow_ema=22, bars_window=10,
                  swing_len=16, liq_tolerance=0.5,
-                 sens_fvg=0.5, atr_len=14, tp_mult=3.0, sl_mult=2.0,
-                 use_liq=True, use_fvg=True):
+                 ob_lookback=5, ob_min_size=2.0, use_volume=True,
+                 atr_len=14, tp_mult=3.0, sl_mult=2.0,
+                 use_liq=True, use_ob=True):
         self.fast_ema = fast_ema
         self.slow_ema = slow_ema
         self.bars_window = bars_window
         self.swing_len = swing_len
         self.liq_tolerance = liq_tolerance / 100.0
-        self.sens_fvg = sens_fvg / 100.0
+        self.ob_lookback = ob_lookback
+        self.ob_min_size = ob_min_size / 100.0
+        self.use_volume = use_volume
         self.atr_len = atr_len
         self.tp_mult = tp_mult
         self.sl_mult = sl_mult
         self.use_liq = use_liq
-        self.use_fvg = use_fvg
+        self.use_ob = use_ob
         
-        # Arrays persistentes (simulan var arrays de Pine)
+        # Arrays persistentes
         self.liq_highs = []   # [{'price': float, 'bar_idx': int, 'mitigated': bool, 'mitig_bar': int}, ...]
         self.liq_lows = []
-        self.fvg_zones = []   # [{'top': float, 'bot': float, 'origin_bar': int, 'mitigated': bool, 'mitig_bar': int, 'is_bull': bool}, ...]
+        self.ob_zones = []    # [{'high': float, 'low': float, 'bar_idx': int, 'is_bull': bool, 'mitigated': bool, 'mitig_bar': int}, ...]
         
     def calculate_indicators(self, df: pd.DataFrame) -> pd.DataFrame:
         """Calcula EMAs y ATR"""
@@ -54,10 +57,13 @@ class EstrategiaEMAZonas:
         true_range = np.max(ranges, axis=1)
         df['atr'] = true_range.rolling(window=self.atr_len).mean()
         
+        # Volumen SMA para filtrar OB
+        if self.use_volume:
+            df['volume_sma'] = df['volume'].rolling(20).mean()
+        
         return df
     
     def check_liquidity_mitigation(self, close: float, bar_idx: int):
-        """Actualiza estado de mitigación de zonas de liquidez"""
         for arr in [self.liq_highs, self.liq_lows]:
             for zone in arr:
                 if zone['mitigated']:
@@ -71,53 +77,39 @@ class EstrategiaEMAZonas:
                     zone['mitigated'] = True
                     zone['mitig_bar'] = bar_idx
 
-    def check_fvg_mitigation(self, close: float, bar_idx: int):
-        """Actualiza estado de mitigación de FVGs"""
-        for zone in self.fvg_zones:
+    def check_ob_mitigation(self, close: float, bar_idx: int):
+        """OB alcista se mitiga si precio cierra dentro o debajo del rango [low, high]"""
+        for zone in self.ob_zones:
             if zone['mitigated']:
                 continue
-            top, bot, is_bull = zone['top'], zone['bot'], zone['is_bull']
+            h, l, is_bull = zone['high'], zone['low'], zone['is_bull']
             if is_bull:
-                mitigated = close <= top
+                mitigated = close <= h  # dentro o debajo
             else:
-                mitigated = close >= bot
+                mitigated = close >= l  # dentro o sobre
             if mitigated:
                 zone['mitigated'] = True
                 zone['mitig_bar'] = bar_idx
 
     def recent_zone_mitigated(self, bar_idx: int) -> bool:
-        """Retorna True si alguna zona se mitigó en la última ventana de barras"""
         window_start = bar_idx - self.bars_window
-        # Liquidez highs
-        for zone in self.liq_highs:
-            if zone['mitigated'] and zone['mitig_bar'] >= window_start:
-                return True
-        # Liquidez lows
-        for zone in self.liq_lows:
-            if zone['mitigated'] and zone['mitig_bar'] >= window_start:
-                return True
-        # FVGs
-        for zone in self.fvg_zones:
+        for zone in self.liq_highs + self.liq_lows + self.ob_zones:
             if zone['mitigated'] and zone['mitig_bar'] >= window_start:
                 return True
         return False
 
     def generate_signals(self, df: pd.DataFrame) -> pd.DataFrame:
-        """
-        Genera señales barra a barra sin lookahead.
-        Detectar pivotes: solo confirmar en barra i si el pivot ocurrió en p = i - swing_len
-        """
         n = len(df)
         df['signal'] = 0
-        df['zone_mitigated'] = False  # Debug
+        df['zone_mitigated'] = False
         
-        # Preparar arrays vacíos
+        # Reset
         self.liq_highs.clear()
         self.liq_lows.clear()
-        self.fvg_zones.clear()
+        self.ob_zones.clear()
         
-        # Pre-calcular pivotes confirmables por barra
-        pending_highs = []  # (conf_bar, origin_bar, price)
+        # Pre-calcular pivotes confirmables
+        pending_highs = []
         pending_lows = []
         
         for i in range(self.swing_len, n):
@@ -125,7 +117,7 @@ class EstrategiaEMAZonas:
             if p < self.swing_len:
                 continue
             
-            # Swing High: high[p] > todos en [p-swing_len, p-1] y [p+1, p+swing_len]
+            # Swing High
             left_max = df['high'].iloc[p - self.swing_len : p].max()
             right_max = df['high'].iloc[p+1 : i+1].max()
             if df['high'].iloc[p] > left_max and df['high'].iloc[p] > right_max:
@@ -144,7 +136,7 @@ class EstrategiaEMAZonas:
         
         # Loop principal
         for i in range(n):
-            # Añadir zonas confirmadas esta barra
+            # Añadir zonas de liquidez confirmadas esta barra
             while idx_high < len(pending_highs) and pending_highs[idx_high][0] == i:
                 conf, origin, price = pending_highs[idx_high]
                 self.liq_highs.append({
@@ -164,41 +156,55 @@ class EstrategiaEMAZonas:
                 })
                 idx_low += 1
             
-            # FVG
-            if i >= 2:
-                # Bull FVG
-                if df.iloc[i]['low'] > df.iloc[i-2]['high'] and df.iloc[i-1]['close'] > df.iloc[i-1]['open']:
-                    top = df.iloc[i]['low']
-                    bot = df.iloc[i-2]['high']
-                    size_pct = abs(top - bot) / df.iloc[i]['close'] * 100
-                    if size_pct >= self.sens_fvg * 100:
-                        self.fvg_zones.append({
-                            'top': top,
-                            'bot': bot,
-                            'origin_bar': i-1,
+            # Detectar Order Blocks (requiere i>=1 y lookback pasado)
+            if i >= 1 and self.use_ob:
+                look = min(self.ob_lookback, i)
+                price_i = df.iloc[i]['close']
+                price_look = df.iloc[i-look]['close']
+                
+                # Bullish OB: vela previa bajista + movimiento alcista fuerte
+                momentum_up = (price_i - price_look) / price_look
+                prev_bearish = df.iloc[i-1]['open'] > df.iloc[i-1]['close']
+                strong_up = momentum_up >= self.ob_min_size
+                if prev_bearish and strong_up and price_i > df.iloc[i]['open']:
+                    # Filtrar por volumen
+                    ok = True
+                    if self.use_volume and 'volume_sma' in df.columns:
+                        avg_vol = df.iloc[i-1]['volume_sma']
+                        ok = df.iloc[i-1]['volume'] > avg_vol * 1.2
+                    if ok:
+                        self.ob_zones.append({
+                            'high': df.iloc[i-1]['high'],
+                            'low': df.iloc[i-1]['low'],
+                            'bar_idx': i-1,
+                            'is_bull': True,
                             'mitigated': False,
-                            'mitig_bar': -1,
-                            'is_bull': True
+                            'mitig_bar': -1
                         })
-                # Bear FVG
-                if df.iloc[i]['high'] < df.iloc[i-2]['low'] and df.iloc[i-1]['close'] < df.iloc[i-1]['open']:
-                    top = df.iloc[i-2]['low']
-                    bot = df.iloc[i]['high']
-                    size_pct = abs(top - bot) / df.iloc[i]['close'] * 100
-                    if size_pct >= self.sens_fvg * 100:
-                        self.fvg_zones.append({
-                            'top': top,
-                            'bot': bot,
-                            'origin_bar': i-1,
+                
+                # Bearish OB: vela previa alcista + movimiento bajista fuerte
+                momentum_down = (price_look - price_i) / price_i
+                prev_bullish = df.iloc[i-1]['open'] < df.iloc[i-1]['close']
+                strong_down = momentum_down >= self.ob_min_size
+                if prev_bullish and strong_down and price_i < df.iloc[i]['open']:
+                    ok = True
+                    if self.use_volume and 'volume_sma' in df.columns:
+                        avg_vol = df.iloc[i-1]['volume_sma']
+                        ok = df.iloc[i-1]['volume'] > avg_vol * 1.2
+                    if ok:
+                        self.ob_zones.append({
+                            'high': df.iloc[i-1]['high'],
+                            'low': df.iloc[i-1]['low'],
+                            'bar_idx': i-1,
+                            'is_bull': False,
                             'mitigated': False,
-                            'mitig_bar': -1,
-                            'is_bull': False
+                            'mitig_bar': -1
                         })
             
             # Mitigaciones
             close_i = df.iloc[i]['close']
             self.check_liquidity_mitigation(close_i, i)
-            self.check_fvg_mitigation(close_i, i)
+            self.check_ob_mitigation(close_i, i)
             
             # EMA cross
             if i < 1:
@@ -225,7 +231,6 @@ class EstrategiaEMAZonas:
         return df
 
     def run_backtest(self, df: pd.DataFrame, initial_capital=10000) -> Dict:
-        """Ejecuta backtest completo con TP/SL dinámicos"""
         df = self.calculate_indicators(df.copy())
         df = self.generate_signals(df)
         
@@ -312,7 +317,6 @@ class EstrategiaEMAZonas:
                     })
                     position = 0
                     
-        # Cerrar posición final
         if position != 0:
             exit_price = df.iloc[-1]['close']
             if position == 1:
@@ -353,14 +357,12 @@ class EstrategiaEMAZonas:
         total_pnl = sum(t['pnl'] for t in trades)
         avg_win = np.mean([t['pnl'] for t in trades if t['pnl'] > 0]) if winning else 0
         avg_loss = np.mean([t['pnl'] for t in trades if t['pnl'] < 0]) if losing else 0
-        profit_factor = abs(sum(t['pnl'] for t in trades if t['pnl'] > 0) /
-                           sum(t['pnl'] for t in trades if t['pnl'] < 0)) if losing else np.inf
-        
         gross_profit = sum(t['pnl'] for t in trades if t['pnl'] > 0)
         gross_loss = abs(sum(t['pnl'] for t in trades if t['pnl'] < 0))
+        profit_factor = gross_profit / gross_loss if gross_loss > 0 else np.inf
         
         print("\n" + "="*70)
-        print("BACKTEST RESULTS — EMA 3/22 + ZONAS MITIGADAS")
+        print("BACKTEST RESULTS — EMA 3/22 + ZONAS OB/LIQ MITIGADAS")
         print("="*70)
         print(f"Periodo:            {results['df'].index[0].date()} → {results['df'].index[-1].date()}")
         print(f"Capital inicial:    ${results['initial_capital']:,.2f}")
@@ -376,12 +378,10 @@ class EstrategiaEMAZonas:
         print(f"Avg win:           ${avg_win:,.2f}")
         print(f"Avg loss:          ${avg_loss:,.2f}")
         
-        # Por tipo
         longs = sum(1 for t in trades if t['type']=='long')
         shorts = sum(1 for t in trades if t['type']=='short')
         print(f"Longs: {longs} | Shorts: {shorts}")
         
-        # Razones de salida
         reasons = {}
         for t in trades:
             r = t['reason']
@@ -392,7 +392,6 @@ class EstrategiaEMAZonas:
             
         print("="*70)
         
-        # Mostrar algunos trades como ejemplo
         print("\nPrimeros 5 trades:")
         for i, t in enumerate(trades[:5]):
             print(f"{i+1}. {t['type'].upper()} | Entry: {t['entry']:.2f} @ {t['entry_bar']} | "
@@ -400,7 +399,6 @@ class EstrategiaEMAZonas:
 
 
 def download_data(symbol: str, years: int = 5) -> pd.DataFrame:
-    """Descarga datos históricos usando yfinance"""
     try:
         import yfinance as yf
     except ImportError:
@@ -417,7 +415,6 @@ def download_data(symbol: str, years: int = 5) -> pd.DataFrame:
         print(f"No se encontraron datos para {symbol}")
         sys.exit(1)
         
-    # Renombrar columnas a nuestro estándar
     df = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
     df.columns = ['open', 'high', 'low', 'close', 'volume']
     df.index.name = 'timestamp'
@@ -428,7 +425,6 @@ def download_data(symbol: str, years: int = 5) -> pd.DataFrame:
 
 
 def load_csv(filepath: str) -> pd.DataFrame:
-    """Carga datos desde CSV local"""
     try:
         df = pd.read_csv(filepath, parse_dates=['timestamp'])
         df.set_index('timestamp', inplace=True)
@@ -446,17 +442,18 @@ def load_csv(filepath: str) -> pd.DataFrame:
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description='Backtester EMA 3/22 + Zonas Mitigadas')
-    parser.add_argument('csv', nargs='?', help='Archivo CSV con datos (opcional si usas --download)')
-    parser.add_argument('--download', metavar='SYMBOL', help='Descargar datos de yfinance (ej: BTC-USD)')
-    parser.add_argument('--years', type=int, default=5, help='Años de datos a descargar (default: 5)')
-    parser.add_argument('--fast', type=int, default=3, help='EMA rápida (default: 3)')
-    parser.add_argument('--slow', type=int, default=22, help='EMA lenta (default: 22)')
-    parser.add_argument('--window', type=int, default=10, help='Ventana post-mitigación (default: 10)')
+    parser = argparse.ArgumentParser(description='Backtester EMA 3/22 + Zonas OB/Liq Mitigadas')
+    parser.add_argument('csv', nargs='?', help='Archivo CSV con datos')
+    parser.add_argument('--download', metavar='SYMBOL', help='Descargar datos de yfinance')
+    parser.add_argument('--years', type=int, default=5)
+    parser.add_argument('--fast', type=int, default=3)
+    parser.add_argument('--slow', type=int, default=22)
+    parser.add_argument('--window', type=int, default=10)
+    parser.add_argument('--ob_lookback', type=int, default=5, help='Lookback para OB (default: 5)')
+    parser.add_argument('--ob_min_size', type=float, default=2.0, help='Tamaño mínimo OB %% (default: 2.0)')
     
     args = parser.parse_args()
     
-    # Cargar o descargar datos
     if args.download:
         df = download_data(args.download, years=args.years)
         csv_name = f"{args.download.replace('-','_')}_{args.years}y.csv"
@@ -465,23 +462,24 @@ def main():
     elif args.csv:
         df = load_csv(args.csv)
     else:
-        print("Error: Debes especificar un archivo CSV o usar --download SYMBOL")
+        print("Error: Debes especificar CSV o --download SYMBOL")
         parser.print_help()
         sys.exit(1)
         
-    # Configurar estrategia
     params = {
         'fast_ema': args.fast,
         'slow_ema': args.slow,
         'bars_window': args.window,
         'swing_len': 16,
         'liq_tolerance': 0.5,
-        'sens_fvg': 0.5,
+        'ob_lookback': args.ob_lookback,
+        'ob_min_size': args.ob_min_size,
+        'use_volume': True,
         'atr_len': 14,
         'tp_mult': 3.0,
         'sl_mult': 2.0,
         'use_liq': True,
-        'use_fvg': True
+        'use_ob': True
     }
     
     print("\n" + "="*70)
@@ -491,14 +489,10 @@ def main():
         print(f"{k}: {v}")
     print("-"*70)
     
-    # Ejecutar backtest
     strat = EstrategiaEMAZonas(**params)
     results = strat.run_backtest(df)
-    
-    # Mostrar resultados
     strat.print_stats(results)
     
-    # Opción de guardar trades detallados
     save = input("\n¿Guardar trades en CSV? (s/N): ").strip().lower()
     if save == 's':
         trades_df = pd.DataFrame(results['trades'])

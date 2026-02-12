@@ -1,45 +1,32 @@
-// INDICADOR: EMA 3/22 + Zonas de Liquidez/Interés Mitigadas
-// Muestra señales visuales (triángulos) cuando se cumple la condición
-// — Cruce EMA 3/22
-// — Previamente se mitigó una zona (liquidez o FVG) en ventana de N barras
-// No ejecuta trades; solo visualización para charting
+// INDICADOR: EMA 3/22 + Zonas de Liquidez/Order Blocks Mitigadas
+// Muestra señales visuales cuando:
+// - Cruce EMA 3/22
+// - Previamente se mitigó una zona (liquidez u Order Block) en ventana de N barras
+// No ejecuta trades; solo visualización
 //@version=6
-indicator("EMA 3/22 + Zonas Mitigadas (Señales)", overlay=true)
+indicator("EMA 3/22 + Zonas OB/Liq (Señales)", overlay=true)
 
 // ═════════════════════════════════════════════════════════════════════════════
 // PARÁMETROS
 // ═════════════════════════════════════════════════════════════════════════════
 fast_ema_len = input.int(3, "EMA Rápida", group="📊 EMAs")
 slow_ema_len = input.int(22, "EMA Lenta", group="📊 EMAs")
-bars_window = input.int(10, "Ventana post-mitigación (barras)", minval=1, maxval=50,
-     tooltip="Máximo barras después de mitigar zona para considerar válido el cruce")
+bars_window = input.int(10, "Ventana post-mitigación (barras)", minval=1, maxval=50)
 
 use_liq = input.bool(true, "Detectar Zonas de Liquidez", group="🔍 Condiciones")
-use_fvg = input.bool(true, "Detectar Zonas de Interés (FVG)", group="🔍 Condiciones")
+use_ob = input.bool(true, "Detectar Order Blocks", group="🔍 Condiciones")
 
+// ═════════════════════════════════════════════════════════════════════════════
+// LIQUIDEZ (Swing Highs/Lows)
+// ═════════════════════════════════════════════════════════════════════════════
 group_liq = "🔹 Zonas de Liquidez"
 swing_len = input.int(16, "Longitud Swing High/Low", group=group_liq, minval=5, maxval=50)
 liq_tolerance = input.float(0.5, "Tolerancia Mitigación (%)", group=group_liq, minval=0.1, step=0.1)
 max_zonas = input.int(20, "Máximo Zonas Visual", group=group_liq, minval=5, maxval=50)
 
-group_fvg = "🔸 Zonas de Interés FVG"
-sens_fvg = input.float(0.5, "Tamaño Mínimo FVG (%)", group=group_fvg, minval=0.1, step=0.1)
-extender_fvg = input.int(20, "Extender FVG (barras)", group=group_fvg, minval=10)
+top = ta.pivothigh(high, swing_len, swing_len)
+bot = ta.pivotlow(low, swing_len, swing_len)
 
-// ═════════════════════════════════════════════════════════════════════════════
-// EMAs y cruces
-// ═════════════════════════════════════════════════════════════════════════════
-ema_fast = ta.ema(close, fast_ema_len)
-ema_slow = ta.ema(close, slow_ema_len)
-plot(ema_fast, color=color.new(color.orange, 0), title="EMA Fast")
-plot(ema_slow, color=color.new(color.blue, 0), title="EMA Slow")
-
-golden_cross = ta.crossover(ema_fast, ema_slow)
-dead_cross = ta.crossunder(ema_fast, ema_slow)
-
-// ═════════════════════════════════════════════════════════════════════════════
-// ARRAYS DE ZONAS (persistentes)
-// ═════════════════════════════════════════════════════════════════════════════
 var float[] liq_highs = array.new_float(0)
 var float[] liq_lows = array.new_float(0)
 var int[] liq_high_bars = array.new_int(0)
@@ -49,23 +36,6 @@ var bool[] liq_low_mitigated = array.new_bool(0)
 var int[] liq_high_mitig_bar = array.new_int(0)
 var int[] liq_low_mitig_bar = array.new_int(0)
 
-var float[] fvg_tops = array.new_float(0)
-var float[] fvg_bottoms = array.new_float(0)
-var int[] fvg_bars = array.new_int(0)
-var bool[] fvg_mitigated = array.new_bool(0)
-var int[] fvg_mitig_bar = array.new_int(0)
-var bool[] fvg_is_bull = array.new_bool(0)
-
-// ═════════════════════════════════════════════════════════════════════════════
-// DETECCIÓN PIVOTS (sin lookahead)
-// ═════════════════════════════════════════════════════════════════════════════
-// En Pine, ta.pivothigh/pivotlow ya devuelven na si no es pivot
-top = ta.pivothigh(high, swing_len, swing_len)
-bot = ta.pivotlow(low, swing_len, swing_len)
-
-// ═════════════════════════════════════════════════════════════════════════════
-// 1) AÑADIR NUEVAS ZONAS AL DETECTAR PIVOTS
-// ═════════════════════════════════════════════════════════════════════════════
 if not na(top)
     array.push(liq_highs, top)
     array.push(liq_high_bars, bar_index[swing_len])
@@ -78,9 +48,7 @@ if not na(bot)
     array.push(liq_low_mitigated, false)
     array.push(liq_low_mitig_bar, -1)
 
-// ═════════════════════════════════════════════════════════════════════════════
-// 2) LIMPIAR ARRAYS ANTES DE CUALQUIER ITERACIÓN
-// ═════════════════════════════════════════════════════════════════════════════
+// Limitar tamaño
 if array.size(liq_highs) > max_zonas
     array.shift(liq_highs)
     array.shift(liq_high_bars)
@@ -93,17 +61,7 @@ if array.size(liq_lows) > max_zonas
     array.shift(liq_low_mitigated)
     array.shift(liq_low_mitig_bar)
 
-if array.size(fvg_tops) > max_zonas
-    array.shift(fvg_tops)
-    array.shift(fvg_bottoms)
-    array.shift(fvg_bars)
-    array.shift(fvg_mitigated)
-    array.shift(fvg_mitig_bar)
-    array.shift(fvg_is_bull)
-
-// ═════════════════════════════════════════════════════════════════════════════
-// 3) VERIFICAR MITIGACIONES (ITERAR solo si hay elementos)
-// ═════════════════════════════════════════════════════════════════════════════
+// Verificar mitigación (tamaño guardado)
 len_liq_h = array.size(liq_highs)
 if len_liq_h > 0
     for i = 0 to len_liq_h - 1
@@ -121,58 +79,99 @@ if len_liq_l > 0
             array.set(liq_low_mitig_bar, i, bar_index)
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 4) DETECCIÓN FVG
+// ORDER BLOCKS (Zonas de Interés)
 // ═════════════════════════════════════════════════════════════════════════════
-bull_fvg = low > high[2] and close[1] > open[1]
-bear_fvg = high < low[2] and close[1] < open[1]
+group_ob = "🔸 Order Blocks"
+ob_lookback = input.int(5, "Lookback OB", minval=3, maxval=20, group=group_ob)
+ob_min_size = input.float(2.0, "Tamaño mínimo OB %", minval=0.5, step=0.5, group=group_ob)
+use_volume = input.bool(true, "Filtrar por Volumen", group=group_ob)
+max_ob = input.int(15, "Máximo OB visual", minval=5, maxval=50, group=group_ob)
 
-bull_size = bull_fvg ? (low - high[2]) / high[2] * 100 : 0
-bear_size = bear_fvg ? (low[2] - high) / high * 100 : 0
+// Arrays para Order Blocks
+var float[] ob_highs = array.new_float(0)
+var float[] ob_lows = array.new_float(0)
+var int[] ob_bars = array.new_int(0)
+var bool[] ob_is_bull = array.new_bool(0)
+var bool[] ob_mitigated = array.new_bool(0)
+var int[] ob_mitig_bar = array.new_int(0)
 
-valid_bull = bull_fvg and bull_size >= sens_fvg
-valid_bear = bear_fvg and bear_size >= sens_fvg
+// Detectar OB Alcista: vela bajista seguida de movimiento alcista fuerte
+momentum_up = (close - close[ob_lookback]) / close[ob_lookback] * 100
+prev_bearish = open[1] > close[1]
+strong_up = momentum_up >= ob_min_size
+bull_ob = prev_bearish and strong_up and close > open
 
-if valid_bull
-    array.push(fvg_tops, low)
-    array.push(fvg_bottoms, high[2])
-    array.push(fvg_bars, bar_index[1])
-    array.push(fvg_mitigated, false)
-    array.push(fvg_mitig_bar, -1)
-    array.push(fvg_is_bull, true)
+if use_ob and bull_ob
+    // Filtrar por volumen si está activado
+    ok = true
+    if use_volume
+        avg_vol = ta.sma(volume, 20)
+        ok := volume[1] > avg_vol[1] * 1.2
+    if ok
+        array.push(ob_highs, high[1])
+        array.push(ob_lows, low[1])
+        array.push(ob_bars, bar_index[1])
+        array.push(ob_is_bull, true)
+        array.push(ob_mitigated, false)
+        array.push(ob_mitig_bar, -1)
 
-if valid_bear
-    array.push(fvg_tops, low[2])
-    array.push(fvg_bottoms, high)
-    array.push(fvg_bars, bar_index[1])
-    array.push(fvg_mitigated, false)
-    array.push(fvg_mitig_bar, -1)
-    array.push(fvg_is_bull, false)
+// Detectar OB Bajista: vela alcista seguida de movimiento bajista fuerte
+momentum_down = (close[ob_lookback] - close) / close * 100
+prev_bullish = open[1] < close[1]
+strong_down = momentum_down >= ob_min_size
+bear_ob = prev_bullish and strong_down and close < open
 
-// Limpieza FVG tras push (ya no se itera, solo tamaño)
-len_fvg = array.size(fvg_tops)
-if len_fvg > max_zonas
-    array.shift(fvg_tops)
-    array.shift(fvg_bottoms)
-    array.shift(fvg_bars)
-    array.shift(fvg_mitigated)
-    array.shift(fvg_mitig_bar)
-    array.shift(fvg_is_bull)
+if use_ob and bear_ob
+    ok = true
+    if use_volume
+        avg_vol = ta.sma(volume, 20)
+        ok := volume[1] > avg_vol[1] * 1.2
+    if ok
+        array.push(ob_highs, high[1])
+        array.push(ob_lows, low[1])
+        array.push(ob_bars, bar_index[1])
+        array.push(ob_is_bull, false)
+        array.push(ob_mitigated, false)
+        array.push(ob_mitig_bar, -1)
 
-// Verificar mitigación FVG (solo si hay zonas)
-len_fvg2 = array.size(fvg_tops)
-if len_fvg2 > 0
-    for i = 0 to len_fvg2 - 1
-        top = array.get(fvg_tops, i)
-        bot = array.get(fvg_bottoms, i)
-        is_bull = array.get(fvg_is_bull, i)
-        if not array.get(fvg_mitigated, i)
-            mitigated = is_bull ? close <= top : close >= bot
+// Limitar OB arrays
+if array.size(ob_highs) > max_ob
+    array.shift(ob_highs)
+    array.shift(ob_lows)
+    array.shift(ob_bars)
+    array.shift(ob_is_bull)
+    array.shift(ob_mitigated)
+    array.shift(ob_mitig_bar)
+
+// Verificar mitigación OB
+len_ob = array.size(ob_highs)
+if len_ob > 0
+    for i = 0 to len_ob - 1
+        h = array.get(ob_highs, i)
+        l = array.get(ob_lows, i)
+        is_bull = array.get(ob_is_bull, i)
+        already = array.get(ob_mitigated, i)
+        if not already
+            // OB alcista se mitiga si precio cierra dentro o debajo del OB
+            // OB bajista se mitiga si precio cierra dentro o sobre del OB
+            mitigated = is_bull ? close <= h : close >= l
             if mitigated
-                array.set(fvg_mitigated, i, true)
-                array.set(fvg_mitig_bar, i, bar_index)
+                array.set(ob_mitigated, i, true)
+                array.set(ob_mitig_bar, i, bar_index)
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 5) FUNCIONES DE MITIGACIÓN RECIENTE (con comprobación size>0)
+// EMAs y cruces
+// ═════════════════════════════════════════════════════════════════════════════
+ema_fast = ta.ema(close, fast_ema_len)
+ema_slow = ta.ema(close, slow_ema_len)
+plot(ema_fast, color=color.new(color.orange, 0), title="EMA Fast")
+plot(ema_slow, color=color.new(color.blue, 0), title="EMA Slow")
+
+golden_cross = ta.crossover(ema_fast, ema_slow)
+dead_cross = ta.crossunder(ema_fast, ema_slow)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DETERMINAR SI HAY MITIGACIÓN RECIENTE
 // ═════════════════════════════════════════════════════════════════════════════
 recent_liq_high_mitigated() =>
     var result = false
@@ -200,25 +199,25 @@ recent_liq_low_mitigated() =>
                     break
     result
 
-recent_fvg_mitigated() =>
+recent_ob_mitigated() =>
     var result = false
     result := false
-    len_f = array.size(fvg_tops)
-    if len_f > 0
-        for i = 0 to len_f - 1
-            if array.get(fvg_mitigated, i)
-                mbar = array.get(fvg_mitig_bar, i)
+    len_ob = array.size(ob_highs)
+    if len_ob > 0
+        for i = 0 to len_ob - 1
+            if array.get(ob_mitigated, i)
+                mbar = array.get(ob_mitig_bar, i)
                 if mbar >= 0 and bar_index - mbar <= bars_window
                     result := true
                     break
     result
 
 zone_liq_ok = not use_liq or (recent_liq_high_mitigated() or recent_liq_low_mitigated())
-zone_fvg_ok = not use_fvg or recent_fvg_mitigated()
-zone_ok = zone_liq_ok and zone_fvg_ok
+zone_ob_ok = not use_ob or recent_ob_mitigated()
+zone_ok = zone_liq_ok and zone_ob_ok
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 6) SEÑALES (solo visuales, no trading)
+// SEÑALES
 // ═════════════════════════════════════════════════════════════════════════════
 long_signal = golden_cross and zone_ok
 short_signal = dead_cross and zone_ok
@@ -229,7 +228,7 @@ plotshape(short_signal, title="Short Signal", location=location.abovebar,
           color=color.red, style=shape.triangledown, size=size.small)
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 7) VISUALIZACIÓN DE ZONAS (solo si hay zonas)
+// VISUALIZACIÓN DE ZONAS
 // ═════════════════════════════════════════════════════════════════════════════
 // Liquidez no mitigada
 len_h_draw = array.size(liq_highs)
@@ -252,17 +251,19 @@ if len_l_draw > 0
             line.new(bar_l, l, bar_index + 15, l,
                      color=color.new(color.green, 60), width=1)
 
-// FVGs no mitigados
-len_fvg_draw = array.size(fvg_tops)
-if len_fvg_draw > 0
-    for i = 0 to len_fvg_draw - 1
-        if not array.get(fvg_mitigated, i)
-            box.new(array.get(fvg_bars, i), array.get(fvg_tops, i),
-                    bar_index + extender_fvg, array.get(fvg_bottoms, i),
-                    bgcolor=color.new(color.gray, 85), border_color=color.gray)
+// Order Blocks no mitigados (cuadrados)
+len_ob_draw = array.size(ob_highs)
+if len_ob_draw > 0
+    for i = 0 to len_ob_draw - 1
+        if not array.get(ob_mitigated, i)
+            box.new(array.get(ob_bars, i), array.get(ob_highs, i),
+                    bar_index + 30, array.get(ob_lows, i),
+                    bgcolor=array.get(ob_is_bull, i) ? color.new(color.blue, 90) : color.new(color.red, 90),
+                    border_color=array.get(ob_is_bull, i) ? color.blue : color.red,
+                    border_width=1)
 
 // ═════════════════════════════════════════════════════════════════════════════
-// 8) ALERTAS
+// ALERTAS
 // ═════════════════════════════════════════════════════════════════════════════
 alertcondition(long_signal, "Long Signal", "EMA crossover + zona mitigada (LONG)")
 alertcondition(short_signal, "Short Signal", "EMA crossover + zona mitigada (SHORT)")
