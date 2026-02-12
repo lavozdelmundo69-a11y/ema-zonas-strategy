@@ -1,0 +1,230 @@
+// INDICADOR: EMA 3/22 + Zonas de Liquidez/Interés Mitigadas
+// Muestra señales visuales (triángulos) cuando se cumple la condición
+// — Cruce EMA 3/22
+// — Previamente se mitigó una zona (liquidez o FVG) en ventana de N barras
+// No ejecuta trades; solo visualización para charting
+//@version=6
+indicator("EMA 3/22 + Zonas Mitigadas (Señales)", overlay=true)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// PARÁMETROS
+// ═════════════════════════════════════════════════════════════════════════════
+fast_ema_len = input.int(3, "EMA Rápida", group="📊 EMAs")
+slow_ema_len = input.int(22, "EMA Lenta", group="📊 EMAs")
+bars_window = input.int(10, "Ventana post-mitigación (barras)", minval=1, maxval=50,
+     tooltip="Máximo barras después de mitigar zona para considerar válido el cruce")
+
+use_liq = input.bool(true, "Detectar Zonas de Liquidez", group="🔍 Condiciones")
+use_fvg = input.bool(true, "Detectar Zonas de Interés (FVG)", group="🔍 Condiciones")
+
+group_liq = "🔹 Zonas de Liquidez"
+swing_len = input.int(16, "Longitud Swing High/Low", group=group_liq, minval=5, maxval=50)
+liq_tolerance = input.float(0.5, "Tolerancia Mitigación (%)", group=group_liq, minval=0.1, step=0.1)
+max_zonas = input.int(20, "Máximo Zonas Visual", group=group_liq, minval=5, maxval=50)
+
+group_fvg = "🔸 Zonas de Interés FVG"
+sens_fvg = input.float(0.5, "Tamaño Mínimo FVG (%)", group=group_fvg, minval=0.1, step=0.1)
+extender_fvg = input.int(20, "Extender FVG (barras)", group=group_fvg, minval=10)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// EMAs y cruces
+// ═════════════════════════════════════════════════════════════════════════════
+ema_fast = ta.ema(close, fast_ema_len)
+ema_slow = ta.ema(close, slow_ema_len)
+plot(ema_fast, color=color.new(color.orange, 0), title="EMA Fast")
+plot(ema_slow, color=color.new(color.blue, 0), title="EMA Slow")
+
+golden_cross = ta.crossover(ema_fast, ema_slow)
+dead_cross = ta.crossunder(ema_fast, ema_slow)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ZONAS DE LIQUIDEZ (Swing Highs/Lows)
+// ═════════════════════════════════════════════════════════════════════════════
+top = ta.pivothigh(high, swing_len, swing_len)
+bot = ta.pivotlow(low, swing_len, swing_len)
+
+var float[] liq_highs = array.new_float(0)
+var float[] liq_lows = array.new_float(0)
+var int[] liq_high_bars = array.new_int(0)
+var int[] liq_low_bars = array.new_int(0)
+var bool[] liq_high_mitigated = array.new_bool(0)
+var bool[] liq_low_mitigated = array.new_bool(0)
+var int[] liq_high_mitig_bar = array.new_int(0)
+var int[] liq_low_mitig_bar = array.new_int(0)
+
+// Agregar nuevas zonas
+if not na(top)
+    array.push(liq_highs, top)
+    array.push(liq_high_bars, bar_index[swing_len])
+    array.push(liq_high_mitigated, false)
+    array.push(liq_high_mitig_bar, -1)
+
+if not na(bot)
+    array.push(liq_lows, bot)
+    array.push(liq_low_bars, bar_index[swing_len])
+    array.push(liq_low_mitigated, false)
+    array.push(liq_low_mitig_bar, -1)
+
+// Limitar tamaño
+if array.size(liq_highs) > max_zonas
+    array.shift(liq_highs)
+    array.shift(liq_high_bars)
+    array.shift(liq_high_mitigated)
+    array.shift(liq_high_mitig_bar)
+
+if array.size(liq_lows) > max_zonas
+    array.shift(liq_lows)
+    array.shift(liq_low_bars)
+    array.shift(liq_low_mitigated)
+    array.shift(liq_low_mitig_bar)
+
+// Verificar mitigación
+for i = 0 to array.size(liq_highs) - 1
+    h = array.get(liq_highs, i)
+    if not array.get(liq_high_mitigated, i) and close > h * (1 + liq_tolerance/100)
+        array.set(liq_high_mitigated, i, true)
+        array.set(liq_high_mitig_bar, i, bar_index)
+
+for i = 0 to array.size(liq_lows) - 1
+    l = array.get(liq_lows, i)
+    if not array.get(liq_low_mitigated, i) and close < l * (1 - liq_tolerance/100)
+        array.set(liq_low_mitigated, i, true)
+        array.set(liq_low_mitig_bar, i, bar_index)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ZONAS DE INTERÉS (FVG)
+// ═════════════════════════════════════════════════════════════════════════════
+bull_fvg = low > high[2] and close[1] > open[1]
+bear_fvg = high < low[2] and close[1] < open[1]
+
+bull_size = bull_fvg ? (low - high[2]) / high[2] * 100 : 0
+bear_size = bear_fvg ? (low[2] - high) / high * 100 : 0
+
+valid_bull = bull_fvg and bull_size >= sens_fvg
+valid_bear = bear_fvg and bear_size >= sens_fvg
+
+var float[] fvg_tops = array.new_float(0)
+var float[] fvg_bottoms = array.new_float(0)
+var int[] fvg_bars = array.new_int(0)
+var bool[] fvg_mitigated = array.new_bool(0)
+var int[] fvg_mitig_bar = array.new_int(0)
+var bool[] fvg_is_bull = array.new_bool(0)
+
+if valid_bull
+    array.push(fvg_tops, low)
+    array.push(fvg_bottoms, high[2])
+    array.push(fvg_bars, bar_index[1])
+    array.push(fvg_mitigated, false)
+    array.push(fvg_mitig_bar, -1)
+    array.push(fvg_is_bull, true)
+
+if valid_bear
+    array.push(fvg_tops, low[2])
+    array.push(fvg_bottoms, high)
+    array.push(fvg_bars, bar_index[1])
+    array.push(fvg_mitigated, false)
+    array.push(fvg_mitig_bar, -1)
+    array.push(fvg_is_bull, false)
+
+if array.size(fvg_tops) > max_zonas
+    array.shift(fvg_tops)
+    array.shift(fvg_bottoms)
+    array.shift(fvg_bars)
+    array.shift(fvg_mitigated)
+    array.shift(fvg_mitig_bar)
+    array.shift(fvg_is_bull)
+
+// Verificar mitigación FVG
+for i = 0 to array.size(fvg_tops) - 1
+    top = array.get(fvg_tops, i)
+    bot = array.get(fvg_bottoms, i)
+    is_bull = array.get(fvg_is_bull, i)
+    if not array.get(fvg_mitigated, i)
+        mitigated = is_bull ? close <= top : close >= bot
+        if mitigated
+            array.set(fvg_mitigated, i, true)
+            array.set(fvg_mitig_bar, i, bar_index)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// DETERMINAR SI HAY MITIGACIÓN RECIENTE
+// ═════════════════════════════════════════════════════════════════════════════
+recent_liq_high_mitigated() =>
+    var result = false
+    result := false
+    for i = 0 to array.size(liq_highs) - 1
+        if array.get(liq_high_mitigated, i)
+            mbar = array.get(liq_high_mitig_bar, i)
+            if bar_index - mbar <= bars_window and mbar >= 0
+                result := true
+                break
+    result
+
+recent_liq_low_mitigated() =>
+    var result = false
+    result := false
+    for i = 0 to array.size(liq_lows) - 1
+        if array.get(liq_low_mitigated, i)
+            mbar = array.get(liq_low_mitig_bar, i)
+            if bar_index - mbar <= bars_window and mbar >= 0
+                result := true
+                break
+    result
+
+recent_fvg_mitigated() =>
+    var result = false
+    result := false
+    for i = 0 to array.size(fvg_tops) - 1
+        if array.get(fvg_mitigated, i)
+            mbar = array.get(fvg_mitig_bar, i)
+            if bar_index - mbar <= bars_window and mbar >= 0
+                result := true
+                break
+    result
+
+zone_liq_ok = not use_liq or (recent_liq_high_mitigated() or recent_liq_low_mitigated())
+zone_fvg_ok = not use_fvg or recent_fvg_mitigated()
+zone_ok = zone_liq_ok and zone_fvg_ok
+
+// ═════════════════════════════════════════════════════════════════════════════
+// SEÑALES (solo visuales, no trading)
+// ═════════════════════════════════════════════════════════════════════════════
+long_signal = golden_cross and zone_ok
+short_signal = dead_cross and zone_ok
+
+plotshape(long_signal, title="Long Signal", location=location.belowbar,
+          color=color.green, style=shape.triangleup, size=size.small)
+plotshape(short_signal, title="Short Signal", location=location.abovebar,
+          color=color.red, style=shape.triangledown, size=size.small)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// VISUALIZACIÓN DE ZONAS
+// ═════════════════════════════════════════════════════════════════════════════
+// Liquidez no mitigada
+for i = 0 to array.size(liq_highs) - 1
+    h = array.get(liq_highs, i)
+    bar_h = array.get(liq_high_bars, i)
+    mitigated = array.get(liq_high_mitigated, i)
+    if not mitigated and bar_index - bar_h <= 30
+        line.new(bar_h, h, bar_index + 15, h,
+                 color=color.new(color.red, 60), width=1)
+
+for i = 0 to array.size(liq_lows) - 1
+    l = array.get(liq_lows, i)
+    bar_l = array.get(liq_low_bars, i)
+    mitigated = array.get(liq_low_mitigated, i)
+    if not mitigated and bar_index - bar_l <= 30
+        line.new(bar_l, l, bar_index + 15, l,
+                 color=color.new(color.green, 60), width=1)
+
+// FVGs no mitigados
+for i = 0 to array.size(fvg_tops) - 1
+    if not array.get(fvg_mitigated, i)
+        box.new(array.get(fvg_bars, i), array.get(fvg_tops, i),
+                bar_index + extender_fvg, array.get(fvg_bottoms, i),
+                bgcolor=color.new(color.gray, 85), border_color=color.gray)
+
+// ═════════════════════════════════════════════════════════════════════════════
+// ALERTAS
+// ═════════════════════════════════════════════════════════════════════════════
+alertcondition(long_signal, "Long Signal", "EMA crossover + zona mitigada (LONG)")
+alertcondition(short_signal, "Short Signal", "EMA crossover + zona mitigada (SHORT)")
