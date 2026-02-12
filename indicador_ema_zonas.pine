@@ -7,11 +7,12 @@
 indicator("EMA 3/22 + Zonas OB/Liq (Señales)", overlay=true)
 
 // ═════════════════════════════════════════════════════════════════════════════
-// PARÁMETROS
+// PARÁMETROS (defaults alineados con backtest agresivo)
 // ═════════════════════════════════════════════════════════════════════════════
 fast_ema_len = input.int(3, "EMA Rápida", group="📊 EMAs")
 slow_ema_len = input.int(22, "EMA Lenta", group="📊 EMAs")
-bars_window = input.int(10, "Ventana post-mitigación (barras)", minval=1, maxval=50)
+bars_window = input.int(20, "Ventana post-mitigación (barras)", minval=1, maxval=50,
+     tooltip="Máximo barras después de mitigar zona para considerar válido el cruce")
 
 use_liq = input.bool(true, "Detectar Zonas de Liquidez", group="🔍 Condiciones")
 use_ob = input.bool(true, "Detectar Order Blocks", group="🔍 Condiciones")
@@ -20,7 +21,7 @@ use_ob = input.bool(true, "Detectar Order Blocks", group="🔍 Condiciones")
 // LIQUIDEZ (Swing Highs/Lows)
 // ═════════════════════════════════════════════════════════════════════════════
 group_liq = "🔹 Zonas de Liquidez"
-swing_len = input.int(16, "Longitud Swing High/Low", group=group_liq, minval=5, maxval=50)
+swing_len = input.int(8, "Longitud Swing High/Low", group=group_liq, minval=5, maxval=50)
 liq_tolerance = input.float(0.5, "Tolerancia Mitigación (%)", group=group_liq, minval=0.1, step=0.1)
 max_zonas = input.int(20, "Máximo Zonas Visual", group=group_liq, minval=5, maxval=50)
 
@@ -61,18 +62,18 @@ if array.size(liq_lows) > max_zonas
     array.shift(liq_low_mitigated)
     array.shift(liq_low_mitig_bar)
 
-// Verificar mitigación (tamaño guardado)
-len_liq_h = array.size(liq_highs)
-if len_liq_h > 0
-    for i = 0 to len_liq_h - 1
+// Verificar mitigación (con comprobación de tamaño)
+len_h = array.size(liq_highs)
+if len_h > 0
+    for i = 0 to len_h - 1
         h = array.get(liq_highs, i)
         if not array.get(liq_high_mitigated, i) and close > h * (1 + liq_tolerance/100)
             array.set(liq_high_mitigated, i, true)
             array.set(liq_high_mitig_bar, i, bar_index)
 
-len_liq_l = array.size(liq_lows)
-if len_liq_l > 0
-    for i = 0 to len_liq_l - 1
+len_l = array.size(liq_lows)
+if len_l > 0
+    for i = 0 to len_l - 1
         l = array.get(liq_lows, i)
         if not array.get(liq_low_mitigated, i) and close < l * (1 - liq_tolerance/100)
             array.set(liq_low_mitigated, i, true)
@@ -82,27 +83,24 @@ if len_liq_l > 0
 // ORDER BLOCKS (Zonas de Interés)
 // ═════════════════════════════════════════════════════════════════════════════
 group_ob = "🔸 Order Blocks"
-ob_lookback = input.int(5, "Lookback OB", minval=3, maxval=20, group=group_ob)
-ob_min_size = input.float(2.0, "Tamaño mínimo OB %", minval=0.5, step=0.5, group=group_ob)
+ob_lookback = input.int(8, "Lookback OB", minval=3, maxval=20, group=group_ob)
+ob_min_size = input.float(0.5, "Tamaño mínimo OB %", minval=0.1, step=0.1, group=group_ob)
 use_volume = input.bool(true, "Filtrar por Volumen", group=group_ob)
-max_ob = input.int(15, "Máximo OB visual", minval=5, maxval=50, group=group_ob)
+max_ob = input.int(30, "Máximo OB visual", minval=5, maxval=100, group=group_ob)
 
-// Arrays para Order Blocks
 var float[] ob_highs = array.new_float(0)
 var float[] ob_lows = array.new_float(0)
 var int[] ob_bars = array.new_int(0)
-var bool[] ob_is_bull = array.new_bool(0)
 var bool[] ob_mitigated = array.new_bool(0)
 var int[] ob_mitig_bar = array.new_int(0)
 
-// Detectar OB Alcista: vela bajista seguida de movimiento alcista fuerte
+// Detectar OB Alcista: vela bajista previa + movimiento alcista en lookback
 momentum_up = (close - close[ob_lookback]) / close[ob_lookback] * 100
 prev_bearish = open[1] > close[1]
 strong_up = momentum_up >= ob_min_size
 bull_ob = prev_bearish and strong_up and close > open
 
 if use_ob and bull_ob
-    // Filtrar por volumen si está activado
     ok = true
     if use_volume
         avg_vol = ta.sma(volume, 20)
@@ -111,11 +109,10 @@ if use_ob and bull_ob
         array.push(ob_highs, high[1])
         array.push(ob_lows, low[1])
         array.push(ob_bars, bar_index[1])
-        array.push(ob_is_bull, true)
         array.push(ob_mitigated, false)
         array.push(ob_mitig_bar, -1)
 
-// Detectar OB Bajista: vela alcista seguida de movimiento bajista fuerte
+// Detectar OB Bajista: vela alcista previa + movimiento bajista
 momentum_down = (close[ob_lookback] - close) / close * 100
 prev_bullish = open[1] < close[1]
 strong_down = momentum_down >= ob_min_size
@@ -130,7 +127,6 @@ if use_ob and bear_ob
         array.push(ob_highs, high[1])
         array.push(ob_lows, low[1])
         array.push(ob_bars, bar_index[1])
-        array.push(ob_is_bull, false)
         array.push(ob_mitigated, false)
         array.push(ob_mitig_bar, -1)
 
@@ -139,20 +135,20 @@ if array.size(ob_highs) > max_ob
     array.shift(ob_highs)
     array.shift(ob_lows)
     array.shift(ob_bars)
-    array.shift(ob_is_bull)
     array.shift(ob_mitigated)
     array.shift(ob_mitig_bar)
 
-// Verificar mitigación OB (usar tamaño actual en variable local)
+// Verificar mitigación OB
 len_ob = array.size(ob_highs)
 if len_ob > 0
     for i = 0 to len_ob - 1
         h = array.get(ob_highs, i)
         l = array.get(ob_lows, i)
-        is_bull = array.get(ob_is_bull, i)
         already = array.get(ob_mitigated, i)
         if not already
-            mitigated = is_bull ? close <= h : close >= l
+            mitigated = close <= h  // Bull OB: mitigate if price enters OB
+            if not mitigated
+                mitigated := close >= l  // Bear OB: mitigate if price enters OB
             if mitigated
                 array.set(ob_mitigated, i, true)
                 array.set(ob_mitig_bar, i, bar_index)
@@ -249,7 +245,7 @@ if len_l_draw > 0
             line.new(bar_l, l, bar_index + 15, l,
                      color=color.new(color.gray, 30), width=1)
 
-// Order Blocks no mitigados: cuadrados grises (sin区分 dirección)
+// Order Blocks no mitigados: cuadrados grises
 len_ob_draw = array.size(ob_highs)
 if len_ob_draw > 0
     for i = 0 to len_ob_draw - 1
