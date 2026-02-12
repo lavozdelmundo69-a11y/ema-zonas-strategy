@@ -143,7 +143,7 @@ if array.size(ob_highs) > max_ob
     array.shift(ob_mitigated)
     array.shift(ob_mitig_bar)
 
-// Verificar mitigación OB
+// Verificar mitigación OB (usar tamaño actual en variable local)
 len_ob = array.size(ob_highs)
 if len_ob > 0
     for i = 0 to len_ob - 1
@@ -152,8 +152,6 @@ if len_ob > 0
         is_bull = array.get(ob_is_bull, i)
         already = array.get(ob_mitigated, i)
         if not already
-            // OB alcista se mitiga si precio cierra dentro o debajo del OB
-            // OB bajista se mitiga si precio cierra dentro o sobre del OB
             mitigated = is_bull ? close <= h : close >= l
             if mitigated
                 array.set(ob_mitigated, i, true)
