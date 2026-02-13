@@ -30,6 +30,7 @@ class EstrategiaEMAZonas:
         self.sl_mult = sl_mult
         self.use_liq = use_liq
         self.use_ob = use_ob
+        self.no_zones = no_zones if 'no_zones' in locals() else False
         
         self.liq_highs = []
         self.liq_lows = []
@@ -293,14 +294,16 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
         else:
             total_bars_needed = 1000
         
-        # Paginación: Binance permite hasta 1000, pero hay límite de tasa
+        # Paginación: traer todo el histórico
         limit_per_call = 1000
         all_ohlcv = []
-        # Calcular since: timestamp en ms
+        # Calcular since: fecha de inicio en milisegundos
         since = ex.parse8601(str((datetime.now() - timedelta(days=365*years)).isoformat()))
-        # Asegurar que no pedimos más de 1000 barras por llamada, iterar
-        print(f"Descargando datos históricos (últimas {365*years} días) ...")
-        while True:
+        # Obtener timeframe en milisegundos
+        timeframe_ms = ex.parse_timeframe(timeframe) * 1000
+        
+        print(f"Descargando {total_bars_needed} barras de {ex_symbol} ({timeframe}) desde {exchange}...")
+        while len(all_ohlcv) < total_bars_needed:
             try:
                 batch = ex.fetch_ohlcv(ex_symbol, timeframe=timeframe, since=since, limit=limit_per_call)
             except Exception as e:
@@ -309,12 +312,20 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
             if not batch:
                 break
             all_ohlcv.extend(batch)
-            # Avanzar since al último timestamp + 1ms
-            since = batch[-1][0] + 1
+            # Avanzar since al último timestamp + timeframe
+            since = batch[-1][0] + timeframe_ms
             if len(batch) < limit_per_call:
                 break
-            print(f"  Totales acumuladas: {len(all_ohlcv)}")
-            time.sleep(0.1)  # respetar rate limit
+            time.sleep(0.05)  # respetar rate limit
+            
+        if not all_ohlcv:
+            print(f"No datos de {exchange} para {symbol}")
+            sys.exit(1)
+            
+        df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+        df.index.name = 'timestamp'
         
         if not all_ohlcv:
             print(f"No datos de {exchange} para {symbol}")
@@ -342,6 +353,10 @@ def main():
     p.add_argument('--swing_len', type=int, default=16)
     p.add_argument('--ob_lookback', type=int, default=5)
     p.add_argument('--ob_min_size', type=float, default=2.0)
+    p.add_argument('--use-liq', dest='use_liq', action='store_true', default=True, help='Usar zonas de liquidez')
+    p.add_argument('--no-liq', dest='use_liq', action='store_false', help='NO usar zonas de liquidez')
+    p.add_argument('--use-ob', dest='use_ob', action='store_true', default=True, help='Usar Order Blocks')
+    p.add_argument('--no-ob', dest='use_ob', action='store_false', help='NO usar Order Blocks')
     args = p.parse_args()
     
     if args.download:
@@ -366,8 +381,8 @@ def main():
         'atr_len': 14,
         'tp_mult': 3.0,
         'sl_mult': 2.0,
-        'use_liq': True,
-        'use_ob': True
+        'use_liq': args.use_liq,
+        'use_ob': args.use_ob
     }
     print("\n" + "="*70 + "\nCONFIG\n" + "="*70)
     for k,v in params.items(): print(f"{k}: {v}")
