@@ -294,46 +294,69 @@ def download_data(symbol, years=5, interval='1d', exchange='yfinance', limit=Non
         else:
             total_bars_needed = 1000
         
-        # Paginación: traer todo el histórico
+        # Paginación: traer todo el histórico desde fecha inicio hasta ahora
         limit_per_call = 1000
         all_ohlcv = []
-        # Calcular since: fecha de inicio en milisegundos
-        since = ex.parse8601(str((datetime.now() - timedelta(days=365*years)).isoformat()))
-        # Obtener timeframe en milisegundos
-        timeframe_ms = ex.parse_timeframe(timeframe) * 1000
         
-        print(f"Descargando {total_bars_needed} barras de {ex_symbol} ({timeframe}) desde {exchange}...")
-        while len(all_ohlcv) < total_bars_needed:
+        # Fecha de inicio: hace N años
+        end_time = datetime.now()
+        start_time = end_time - timedelta(days=365*years)
+        since = int(start_time.timestamp() * 1000)  # ms
+        
+        # Obtener timeframe en segundos y ms
+        timeframe_sec = ex.parse_timeframe(timeframe)
+        timeframe_ms = timeframe_sec * 1000
+        
+        print(f"Descargando datos desde {start_time.date()} hasta {end_time.date()} ({years} años)...")
+        print(f"Timeframe: {timeframe}, Barras estimadas: {int((365*years*24*60*60)/timeframe_sec)}")
+        
+        max_iterations = 50  # safety limit
+        iteration = 0
+        
+        while iteration < max_iterations:
+            iteration += 1
             try:
+                # fetch_ohlcv devuelve [timestamp, open, high, low, close, volume]
                 batch = ex.fetch_ohlcv(ex_symbol, timeframe=timeframe, since=since, limit=limit_per_call)
             except Exception as e:
-                print(f"Error en fetch: {e}")
+                print(f"Error en iteración {iteration}: {e}")
+                time.sleep(1)
+                continue
+                
+            if not batch or len(batch) == 0:
+                print(f"No más datos en iteración {iteration}")
                 break
-            if not batch:
-                break
+                
             all_ohlcv.extend(batch)
-            # Avanzar since al último timestamp + timeframe
-            since = batch[-1][0] + timeframe_ms
-            if len(batch) < limit_per_call:
+            
+            # El último timestamp del batch
+            last_ts = batch[-1][0]
+            
+            # Si el último timestamp está cerca del presente (dentro de 2 timeframes), terminamos
+            now_ms = int(datetime.now().timestamp() * 1000)
+            if last_ts >= now_ms - (timeframe_ms * 2):
+                print(f"Alcanzado el presente en iteración {iteration}")
                 break
-            time.sleep(0.05)  # respetar rate limit
+                
+            # Avanzar since para la próxima iteración
+            since = last_ts + timeframe_ms
             
-        if not all_ohlcv:
-            print(f"No datos de {exchange} para {symbol}")
-            sys.exit(1)
+            print(f"  Iteración {iteration}: {len(batch)} barras, total acumulado: {len(all_ohlcv)}, última fecha: {pd.to_datetime(last_ts, unit='ms').date()}")
             
-        df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
-        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        df.set_index('timestamp', inplace=True)
-        df.index.name = 'timestamp'
+            # Respetar rate limit (más conservador)
+            time.sleep(0.2)
+            
+        print(f"Descarga completa: {len(all_ohlcv)} barras en {iteration} iteraciones")
         
         if not all_ohlcv:
-            print(f"No datos de {exchange} para {symbol}")
+            print(f"No se obtuvieron datos de {exchange} para {symbol}")
             sys.exit(1)
             
         df = pd.DataFrame(all_ohlcv, columns=['timestamp','open','high','low','close','volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         df.set_index('timestamp', inplace=True)
+        df = df[~df.index.duplicated(keep='first')]  # eliminar duplicados
+        df.sort_index(inplace=True)
         df.index.name = 'timestamp'
     print(f"Barras obtenidas: {len(df)} | Rango: {df.index[0].date()} → {df.index[-1].date()}")
     return df
